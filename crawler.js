@@ -3,6 +3,7 @@ const fs = require('fs')
 const iconv = require('iconv-lite')
 const cheerio = require('cheerio')
 const url = require('url')
+const mime = require('mime')
 
 // 抓取的新闻缓存
 let cache = []
@@ -15,13 +16,11 @@ http.createServer((req, res) => {
       get(req, res)
       break
     case 'POST':
-      post(req, res)
-      break
     case 'PUT':
-      put(req, res)
-      break
     case 'DELETE':
     default:
+      res.writeHead(405, 'Method Not Allowed')
+      res.end()
   }
 }).listen(3333, () => {
   console.log('正在监听端口3333')
@@ -33,69 +32,102 @@ function get (req, res) {
   const urlObj = url.parse(req.url)
   const pathname = urlObj.pathname
   if (pathname === '/') {
-    getNews(req, res);
+    _getNews(req, res);
   } else {
-    res.writeHead(404)
-    res.end(404)
+    res.writeHead(403, 'Forbidden')
+    res.writeHead(400, 'Bad Request')
+    res.end()
   }
 
-  // 获取数据
-  if (!cache.length) { // 第一次获取
-    cache = catchNews()
-  } else { // 若不是第一次
-    let newData = catchNews()
-    let newSum = filter(newData) // 过滤数据，返回新数据的条数
-    cache.unshift(newData.slice(0, newSum)) // 获取新数据并将其移入缓存的最前面
+  function _getNews (req, res) {
+    // 获取数据
+    if (!cache.length) { // 第一次获取
+      catchNews().then(res => {
+        cache = res
+        __renderAndReturn()
+      }, err => {
+        console.log(err)
+      })
+    } else { // 若不是第一次
+      catchNews().then(res => {
+        let newData = res
+        let newSum = filter(newData) // 过滤数据，返回新数据的条数
+        if (newSum) {
+          cache.unshift(newData.slice(0, newSum)) // 获取新数据并将其移入缓存的最前面
+        }
+        __renderAndReturn()
+      }, err => {
+        console.log(err)
+      })
+    }
+
+    function __renderAndReturn () {
+      // 渲染页面，返回html页面
+      let page = render('./template.html', cache)
+
+      // 设置响应头
+      // res.setHeader({
+      //   // 'Content-Type': mime.lookup(page),
+      //   'Content-Type': 'text/html',
+      //   'Content-Length': Buffer.byteLength(page)
+      // })
+      res.writeHead(200, {
+        'Content-Type': 'text/html',
+        'Content-Length': Buffer.byteLength(page)
+      })
+
+      // 响应页面
+      res.end(page)
+    }
   }
-
-  // 渲染页面，返回html页面
-  let page = render(cache)
-
-  // 设置响应头
-  res.setHeader({
-    'Content-Type': 'text/plain',
-    'Content-Length': Buffer.byteLength(page)
-  })
-  res.write()
-
-  // 响应页面
-  res.end(page)
 }
+
 
 /**********************************以上为主逻辑********************************/
 
 function catchNews () {
-  http.get('http://china.nba.com/', (res) => {
-    // 直接写入文件
-    // const ws = fs.createWriteStream('./result.html')
-    // const cs = iconv.decodeStream('gb2312');
-    // res.pipe(cs)
-    //    .pipe(ws)
+  return new Promise((resolve, reject) => {
+    http.get('http://china.nba.com/', (res) => {
+      // 直接写入文件
+      // const ws = fs.createWriteStream('./result.html')
+      // const cs = iconv.decodeStream('gb2312');
+      // res.pipe(cs)
+      //    .pipe(ws)
 
-    let result = []
-    let length = 0
-    res.on('data', (data) => {
-      result.push(data)
-      length += data.length
-    })
-    res.on('end', () => {
-      let d = Buffer.concat(result, length)
-      d = iconv.decode(d, 'gb2312')
-
-      const $ = cheerio.load(d)
-      const ws = fs.createWriteStream
-      let rst = ''
-
-      $('#news #indexNewsWrap .new-warp .new a').each((idx, v) => {
-        rst += (idx + 1) + '.' + $(v).find('h3').text() + '\n'
-               + '链接：' + $(v).attr('href') + '\n'
-               + '时间：' + $(v).siblings().find('.fl').data('time') + '\n'
+      let result = []
+      let length = 0
+      res.on('data', (data) => {
+        result.push(data)
+        length += data.length
       })
+      res.on('end', () => {
+        let d = Buffer.concat(result, length)
+        d = iconv.decode(d, 'gb2312')
 
-      fs.writeFileSync('./result.txt', rst)
+        const $ = cheerio.load(d)
+        const ws = fs.createWriteStream
+        let rst = ''
+        let rstArr = []
+
+        $('#news #indexNewsWrap .new-warp .new a').each((idx, v) => {
+          rst += (idx + 1) + '.' + $(v).find('h3').text() + '\n'
+                 + '链接：' + $(v).attr('href') + '\n'
+                 + '时间：' + $(v).siblings().find('.fl').data('time') + '\n'
+
+          rstArr.push({
+            id: idx,
+            title: $(v).find('h3').text(),
+            url: $(v).attr('href'),
+            time: $(v).siblings().find('.fl').data('time')
+          })
+        })
+
+        fs.writeFileSync('./result.txt', rst)
+        resolve(rstArr)
+      })
+    }).on('error', (err) => {
+      reject(err)
     })
-  }).on('error', (err) => {
-    console.log(err)
   })
 }
 
@@ -114,7 +146,7 @@ function filter (data) {
 }
 
 function render (templateUrl, data) {
-  let tpl = fs.readFileSync(templateUrl)
+  let tpl = fs.readFileSync(templateUrl).toString()
   const dataList = dataToList(data)
   const page = tpl.replace('{{content}}', dataList)
 
@@ -122,5 +154,10 @@ function render (templateUrl, data) {
 }
 
 function dataToList (data) {
-  data.forEach()
+  let rst = ''
+  data.forEach(v => {
+    rst += `<a href="${v.url}">${v.title}</a>
+            <div>${v.time}</div>`
+  })
+  return rst
 }
